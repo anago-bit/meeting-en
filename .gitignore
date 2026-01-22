@@ -1,0 +1,6 @@
+# セキュリティ：これらは絶対にGitHubに上げない
+credentials.json
+token.json
+.env
+__pycache__/
+*.pyc
