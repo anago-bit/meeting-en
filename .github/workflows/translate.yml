@@ -1,0 +1,30 @@
+name: Gemini Meeting Translator
+
+on:
+  workflow_dispatch: # 手動実行用ボタンを表示
+  schedule:
+    - cron: '0 9 * * *' # 毎日日本時間 18:00 (UTC 9:00) に自動実行したい場合
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install google-api-python-client google-auth-oauthlib google-auth-httplib2 google-genai
+
+      - name: Run translation
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FOLDER_ID: ${{ secrets.FOLDER_ID }}
+          # サービスアカウントのJSONを環境変数として渡す
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        run: python main.py
