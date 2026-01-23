@@ -27,7 +27,8 @@ jobs:
       - name: Run translation
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          FOLDER_ID: ${{ secrets.FOLDER_ID }}
-          # サービスアカウントのJSONを環境変数として渡す
+          SOURCE_FOLDER_ID: ${{ secrets.SOURCE_FOLDER_ID }}
+          TARGET_FOLDER_ID: ${{ secrets.TARGET_FOLDER_ID }}
+          SEARCH_KEYWORD: ${{ secrets.SEARCH_KEYWORD }} # 追加
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
         run: python main.py
