@@ -6,33 +6,37 @@ from google import genai
 
 # --- 環境変数（GitHub Secretsから取得） ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-SOURCE_FOLDER_ID = os.environ.get("SOURCE_FOLDER_ID") # Meet議事録の元フォルダID
-TARGET_FOLDER_ID = os.environ.get("TARGET_FOLDER_ID") # 翻訳対象を隔離する専用フォルダID
+SOURCE_FOLDER_ID = os.environ.get("SOURCE_FOLDER_ID")
+TARGET_FOLDER_ID = os.environ.get("TARGET_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
+# 検索キーワードもSecretsから取得
+SEARCH_KEYWORD = os.environ.get("SEARCH_KEYWORD")
 
-# フィルタリングするキーワード（題名に含まれるべき文字列）
-SEARCH_KEYWORD = "レンタカー/リース会議"
-
-# 権限範囲（読み書き・移動が必要なため full drive/docs スコープ）
+# 権限範囲
 SCOPES = [
     'https://www.googleapis.com/auth/documents',
     'https://www.googleapis.com/auth/drive'
 ]
 
 def get_credentials():
-    """サービスアカウントの認証"""
     if not SERVICE_ACCOUNT_JSON:
         raise ValueError("環境変数 SERVICE_ACCOUNT_JSON が未設定です。")
     info = json.loads(SERVICE_ACCOUNT_JSON)
     return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 
 def find_and_move_latest_meeting_doc():
-    """全体フォルダから特定の名前の最新ファイルを探して専用フォルダへ移動"""
+    """SOURCEフォルダからキーワードに合う最新ドキュメントを探してTARGETフォルダへ移動"""
     creds = get_credentials()
     drive_service = build('drive', 'v3', credentials=creds)
     
-    # 1. ソースフォルダ内からキーワードを含み、かつドキュメント形式のファイルを検索（更新順）
-    query = f"'{SOURCE_FOLDER_ID}' in parents and name contains '{SEARCH_KEYWORD}' and mimeType = 'application/vnd.google-apps.document' and trashed = false"
+    # name contains で部分一致検索。trashed = false でゴミ箱を除外。
+    query = (
+        f"'{SOURCE_FOLDER_ID}' in parents and "
+        f"name contains '{SEARCH_KEYWORD}' and "
+        f"mimeType = 'application/vnd.google-apps.document' and "
+        f"trashed = false"
+    )
+    
     results = drive_service.files().list(
         q=query, 
         orderBy="modifiedTime desc", 
@@ -43,16 +47,16 @@ def find_and_move_latest_meeting_doc():
     files = results.get('files', [])
     
     if not files:
-        print(f"情報: キーワード「{SEARCH_KEYWORD}」を含む新しい議事録は見つかりませんでした。")
+        print(f"情報: 題名に「{SEARCH_KEYWORD}」を含む新しい議事録は見つかりませんでした。")
         return None, None
 
     target_file = files[0]
     file_id = target_file['id']
     file_name = target_file['name']
 
-    # 2. 専用フォルダへ移動（まだ移動していない場合のみ）
+    # まだターゲットフォルダにいない場合のみ移動を実行
     if TARGET_FOLDER_ID not in target_file.get('parents', []):
-        print(f"🔒 セキュリティ仕分け: 「{file_name}」を専用フォルダへ移動します。")
+        print(f"🔒 セキュリティ隔離: 「{file_name}」を専用フォルダへ移動します。")
         previous_parents = ",".join(target_file.get('parents'))
         drive_service.files().update(
             fileId=file_id,
@@ -64,7 +68,7 @@ def find_and_move_latest_meeting_doc():
     return file_id, file_name
 
 def read_doc(doc_id):
-    """Googleドキュメントの内容を抽出"""
+    """Googleドキュメントの本文を取得"""
     creds = get_credentials()
     service = build('docs', 'v1', credentials=creds)
     document = service.documents().get(documentId=doc_id).execute()
@@ -76,7 +80,7 @@ def read_doc(doc_id):
     return text
 
 def translate_full_text(text):
-    """Geminiによる一字一句の翻訳"""
+    """Geminiによる一字一句翻訳"""
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     prompt = f"""
@@ -99,21 +103,20 @@ def translate_full_text(text):
     return response.text
 
 def create_translated_doc(folder_id, original_name, translated_text):
-    """翻訳済みドキュメントを作成し専用フォルダに保存"""
+    """翻訳済みドキュメントを作成し、指定フォルダに格納"""
     creds = get_credentials()
     docs_service = build('docs', 'v1', credentials=creds)
     drive_service = build('drive', 'v3', credentials=creds)
 
-    # ドキュメント作成
     title = f"【翻訳完了】{original_name}"
     doc = docs_service.documents().create(body={'title': title}).execute()
     doc_id = doc.get('documentId')
 
-    # 書き込み
+    # テキスト書き込み
     requests = [{'insertText': {'location': {'index': 1}, 'text': translated_text}}]
     docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
 
-    # 専用フォルダへ移動
+    # 作成されたドキュメントをターゲットフォルダへ移動
     file = drive_service.files().get(fileId=doc_id, fields='parents').execute()
     drive_service.files().update(
         fileId=doc_id, 
@@ -125,23 +128,26 @@ def create_translated_doc(folder_id, original_name, translated_text):
 
 if __name__ == "__main__":
     try:
-        print(">>> 1. 議事録の検索とセキュリティ仕分けを開始...")
-        target_id, target_name = find_and_move_latest_meeting_doc()
-        
-        if target_id:
-            print(f">>> 2. 対象ファイル: {target_name}")
-            content = read_doc(target_id)
-            
-            print(">>> 3. Geminiによる一字一句翻訳を実行中...")
-            translated_result = translate_full_text(content)
-            
-            print(">>> 4. 翻訳済みドキュメントを作成中...")
-            new_id = create_translated_doc(TARGET_FOLDER_ID, target_name, translated_result)
-            
-            print(f"\n✅ 成功！専用フォルダに保存されました。")
-            print(f"URL: https://docs.google.com/document/d/{new_id}/edit")
+        if not all([GEMINI_API_KEY, SOURCE_FOLDER_ID, TARGET_FOLDER_ID, SEARCH_KEYWORD]):
+            print("エラー: 必要な環境変数(Secrets)が不足しています。")
         else:
-            print("処理を終了します。")
+            print(f">>> 1. 「{SEARCH_KEYWORD}」の検索と仕分けを開始...")
+            target_id, target_name = find_and_move_latest_meeting_doc()
+            
+            if target_id:
+                print(f">>> 2. 対象ファイルを読み込み中: {target_name}")
+                content = read_doc(target_id)
+                
+                print(">>> 3. Geminiで翻訳を実行中（要約禁止・一字一句）...")
+                translated_result = translate_full_text(content)
+                
+                print(">>> 4. 翻訳ドキュメントを作成中...")
+                new_id = create_translated_doc(TARGET_FOLDER_ID, target_name, translated_result)
+                
+                print(f"\n✅ 完了！専用フォルダ(ID:{TARGET_FOLDER_ID})に保存しました。")
+                print(f"URL: https://docs.google.com/document/d/{new_id}/edit")
+            else:
+                print("条件に合うファイルがなかったため、処理を終了します。")
         
     except Exception as e:
         print(f"❌ エラーが発生しました: {e}")
