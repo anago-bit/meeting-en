@@ -68,16 +68,57 @@ def find_and_move_latest_meeting_doc():
     return file_id, file_name
 
 def read_doc(doc_id):
-    """Googleドキュメントの本文を取得"""
+    """Googleドキュメントの本文を抽出（表の中のテキストも含む）"""
     creds = get_credentials()
     service = build('docs', 'v1', credentials=creds)
     document = service.documents().get(documentId=doc_id).execute()
+    
     text = ""
-    for content in document.get('body').get('content'):
-        if 'paragraph' in content:
-            for element in content.get('paragraph').get('elements'):
-                text += element.get('textRun', {}).get('content', '')
+    def extract_text(elements):
+        content = ""
+        for value in elements:
+            if 'textRun' in value:
+                content += value.get('textRun').get('content')
+            if 'inlineObjectElement' in value:
+                pass # 画像などはスキップ
+        return content
+
+    # ドキュメント全体の構造をループ
+    for body_content in document.get('body').get('content'):
+        if 'paragraph' in body_content:
+            text += extract_text(body_content.get('paragraph').get('elements'))
+        elif 'table' in body_content:
+            # 表（文字起こしが表形式の場合があるため）の中も読み取る
+            for row in body_content.get('table').get('tableRows'):
+                for cell in row.get('tableCells'):
+                    for cell_content in cell.get('content'):
+                        if 'paragraph' in cell_content:
+                            text += extract_text(cell_content.get('paragraph').get('elements'))
     return text
+
+def translate_full_text(text):
+    """Geminiによる一字一句翻訳（Googleの定型文を無視する指示を追加）"""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    prompt = f"""
+    あなたはプロの翻訳者です。
+    送付するテキストはGoogle Meetの議事録ドキュメントです。
+
+    【重要な注意点】
+    1. ドキュメントの冒頭に「要約は生成されませんでした」や「文字起こしを確認できます」といったGoogleのシステムメッセージが含まれている場合がありますが、これらは無視してください。
+    2. その後に続く「実際の会話の内容（文字起こし）」を探し、それを翻訳対象としてください。
+    3. 内容を要約したり省略したりせず、すべての発言を一字一句網羅して翻訳してください。
+    4. 出力は「英語：」「ネパール語：」と分けて記述してください。
+
+    議事録テキスト:
+    {text}
+    """
+    
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt
+    )
+    return response.text
 
 def translate_full_text(text):
     """Geminiによる一字一句翻訳"""
