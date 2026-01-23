@@ -78,7 +78,7 @@ def copy_original_file(file_id, original_name):
         print(f"⚠️ コピー失敗: {e}")
 
 def send_email_notification(title, doc_url):
-    """Talknoteの投稿用アドレスへメールを送信"""
+    """Talknoteの投稿用アドレスへメールを送信（接続安定版）"""
     if not all([MAIL_ADDRESS, MAIL_PASSWORD, TALKNOTE_POST_EMAIL]):
         print("メール設定が不足しているため送信をスキップします。")
         return
@@ -93,15 +93,22 @@ def send_email_notification(title, doc_url):
     msg['Date'] = formatdate(localtime=True)
 
     try:
-        # SMTPサーバーへ接続 (STARTTLS方式)
-        server = smtplib.SMTP(MAIL_SMTP_SERVER, int(MAIL_SMTP_PORT))
-        server.starttls()
+        # ポートが465の場合は直接SSL接続
+        if MAIL_SMTP_PORT == "465":
+            server = smtplib.SMTP_SSL(MAIL_SMTP_SERVER, int(MAIL_SMTP_PORT), timeout=20)
+        else:
+            # それ以外（587等）はSTARTTLS
+            server = smtplib.SMTP(MAIL_SMTP_SERVER, int(MAIL_SMTP_PORT), timeout=20)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        
         server.login(MAIL_ADDRESS, MAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
         print("✅ Talknote投稿用メールの送信に成功しました。")
     except Exception as e:
-        print(f"❌ メール送信エラー: {e}")
+        print(f"❌ メール送信エラー (詳細): {e}")
 
 if __name__ == "__main__":
     try:
