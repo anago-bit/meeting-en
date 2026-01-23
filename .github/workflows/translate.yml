@@ -4,8 +4,8 @@ on:
   # 手動実行用（テストに便利）
   workflow_dispatch:
   # 毎日決まった時間に動かす場合（例：日本時間 21時 = UTC 12時）
-  # schedule:
-  #   - cron: '0 12 * * *'
+  schedule:
+    - cron: '*/5 * * * *'  # 5分ごとに実行
 
 jobs:
   translate:
