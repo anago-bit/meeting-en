@@ -53,20 +53,46 @@ def translate_full_text(text):
     return response.text
 
 def create_and_move_doc(original_name, translated_text):
-    """1. マイドライブ直下に作成 2. ターゲットフォルダへ移動"""
+    """Drive APIを優先して使用する作成フロー"""
     creds = get_credentials()
     drive_service = build('drive', 'v3', credentials=creds)
     docs_service = build('docs', 'v1', credentials=creds)
 
-    # 1. まずは「マイドライブ直下」に作成
     title = f"【翻訳完了】{original_name}"
-    doc = docs_service.documents().create(body={'title': title}).execute()
-    doc_id = doc.get('documentId')
+    
+    # 1. Drive APIを使ってドキュメントを作成（こちらの方が権限エラーに強い傾向があります）
+    file_metadata = {
+        'name': title,
+        'mimeType': 'application/vnd.google-apps.document'
+    }
+    
+    print(">>> ドキュメントの枠を作成中...")
+    file = drive_service.files().create(body=file_metadata, fields='id').execute()
+    doc_id = file.get('id')
 
     # 2. 本文を書き込み
+    print(f">>> 内容を書き込み中... (ID: {doc_id})")
     requests = [{'insertText': {'location': {'index': 1}, 'text': translated_text}}]
     docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
-    print(f">>> ドキュメント作成完了 (ID: {doc_id})")
+
+    # 3. ターゲットフォルダへ移動を試みる
+    if TARGET_FOLDER_ID:
+        try:
+            # 現在の親フォルダ（通常はroot）を確認
+            file_info = drive_service.files().get(fileId=doc_id, fields='parents').execute()
+            previous_parents = ",".join(file_info.get('parents', []))
+            
+            drive_service.files().update(
+                fileId=doc_id,
+                addParents=TARGET_FOLDER_ID,
+                removeParents=previous_parents,
+                fields='id, parents'
+            ).execute()
+            print(f">>> 共有フォルダへの移動に成功しました。")
+        except Exception as e:
+            print(f"⚠️ 移動に失敗しました。マイドライブを確認してください。: {e}")
+
+    return doc_id, title
 
     # 3. ターゲットフォルダへ移動を試みる
     try:
