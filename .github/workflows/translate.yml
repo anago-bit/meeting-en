@@ -29,5 +29,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DOC_ID: ${{ secrets.DOC_ID }}
           # サービスアカウントのJSONを環境変数として渡す
-          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
         run: python main.py
