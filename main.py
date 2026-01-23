@@ -1,6 +1,8 @@
 import os
 import json
-import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formatdate
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from google import genai
@@ -11,8 +13,13 @@ SOURCE_FOLDER_ID = os.environ.get("SOURCE_FOLDER_ID")
 TARGET_FOLDER_ID = os.environ.get("TARGET_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 SEARCH_KEYWORD = os.environ.get("SEARCH_KEYWORD")
-TALKNOTE_API_TOKEN = os.environ.get("TALKNOTE_API_TOKEN")
-TALKNOTE_GROUP_ID = os.environ.get("TALKNOTE_GROUP_ID")
+
+# メール設定
+MAIL_ADDRESS = os.environ.get("MAIL_ADDRESS")
+MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
+MAIL_SMTP_SERVER = os.environ.get("MAIL_SMTP_SERVER")
+MAIL_SMTP_PORT = os.environ.get("MAIL_SMTP_PORT")
+TALKNOTE_POST_EMAIL = os.environ.get("TALKNOTE_POST_EMAIL")
 
 SCOPES = ['https://www.googleapis.com/auth/documents', 'https://www.googleapis.com/auth/drive']
 
@@ -62,30 +69,39 @@ def create_translated_doc(original_name, translated_text):
     return doc_id, title
 
 def copy_original_file(file_id, original_name):
-    """元のファイルをターゲットフォルダへコピーする"""
     drive_service = build('drive', 'v3', credentials=get_credentials())
     try:
-        copy_metadata = {
-            'name': f"【原本】{original_name}",
-            'parents': [TARGET_FOLDER_ID]
-        }
-        drive_service.files().copy(
-            fileId=file_id, 
-            body=copy_metadata, 
-            supportsAllDrives=True
-        ).execute()
-        print(f">>> 元ファイルのコピー完了")
+        copy_metadata = {'name': f"【原本】{original_name}", 'parents': [TARGET_FOLDER_ID]}
+        drive_service.files().copy(fileId=file_id, body=copy_metadata, supportsAllDrives=True).execute()
+        print(f">>> 原本のコピー完了")
     except Exception as e:
         print(f"⚠️ コピー失敗: {e}")
 
-def post_to_talknote(title, doc_url):
-    if not TALKNOTE_API_TOKEN or not TALKNOTE_GROUP_ID:
-        print(f"Talknote設定が不足しています (TOKEN={bool(TALKNOTE_API_TOKEN)}, GROUP={bool(TALKNOTE_GROUP_ID)})")
+def send_email_notification(title, doc_url):
+    """Talknoteの投稿用アドレスへメールを送信"""
+    if not all([MAIL_ADDRESS, MAIL_PASSWORD, TALKNOTE_POST_EMAIL]):
+        print("メール設定が不足しているため送信をスキップします。")
         return
-    headers = {"Authorization": f"Bearer {TALKNOTE_API_TOKEN}"}
-    message = f"✅ 翻訳完了通知\n\n【件名】: {title}\n【URL】: {doc_url}"
-    res = requests.post("https://api.talknote.com/v1/posts", headers=headers, data={"group_id": TALKNOTE_GROUP_ID, "body": message})
-    print("✅ Talknote投稿成功" if res.status_code == 200 else f"❌ Talknote投稿失敗: {res.text}")
+
+    subject = f"翻訳完了: {title}"
+    body = f"議事録の自動翻訳と保存が完了しました。\n\n【タイトル】\n{title}\n\n【URL】\n{doc_url}"
+    
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = MAIL_ADDRESS
+    msg['To'] = TALKNOTE_POST_EMAIL
+    msg['Date'] = formatdate(localtime=True)
+
+    try:
+        # SMTPサーバーへ接続 (STARTTLS方式)
+        server = smtplib.SMTP(MAIL_SMTP_SERVER, int(MAIL_SMTP_PORT))
+        server.starttls()
+        server.login(MAIL_ADDRESS, MAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("✅ Talknote投稿用メールの送信に成功しました。")
+    except Exception as e:
+        print(f"❌ メール送信エラー: {e}")
 
 if __name__ == "__main__":
     try:
@@ -93,20 +109,15 @@ if __name__ == "__main__":
         if target_file:
             print(f">>> 処理開始: {target_file['name']}")
             content = read_doc(target_file['id'])
-            print(f">>> 取得文字数: {len(content)} 文字")
-            
-            # 翻訳
             translated = translate_full_text(content)
-            
-            # 翻訳済みドキュメント作成
             new_id, new_title = create_translated_doc(target_file['name'], translated)
-            
-            # 元ファイルをコピーして保存 ★ここを移動からコピーに変更
             copy_original_file(target_file['id'], target_file['name'])
             
             url = f"https://docs.google.com/document/d/{new_id}/edit"
             print(f"✅ 全工程完了 URL: {url}")
-            post_to_talknote(new_title, url)
+            
+            # メール通知を実行
+            send_email_notification(new_title, url)
         else:
             print("対象ファイルが見つかりませんでした。")
     except Exception as e:
