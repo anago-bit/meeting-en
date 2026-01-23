@@ -96,28 +96,27 @@ def create_translated_doc(folder_id, original_name, translated_text):
     docs_service = build('docs', 'v1', credentials=creds)
     drive_service = build('drive', 'v3', credentials=creds)
 
-    # 1. 翻訳後のドキュメントを作成（最初はルートに作成される）
+    # 1. 翻訳後のドキュメントのメタデータを定義
     title = f"【翻訳完了】{original_name}"
-    doc = docs_service.documents().create(body={'title': title}).execute()
-    doc_id = doc.get('documentId')
+    
+    # Drive APIを使って、最初から特定のフォルダ(folder_id)の中にドキュメントを作成する
+    file_metadata = {
+        'name': title,
+        'mimeType': 'application/vnd.google-apps.document',
+        'parents': [folder_id]
+    }
+    
+    # ドキュメント（ファイル）の枠を先に作成
+    file = drive_service.files().create(body=file_metadata, fields='id').execute()
+    doc_id = file.get('id')
 
-    # 2. テキストを書き込む
-    requests = [{'insertText': {'location': {'index': 1}, 'text': translated_text}}]
+    # 2. Docs APIを使って、作成したドキュメントに中身を書き込む
+    requests = [
+        {'insertText': {'location': {'index': 1}, 'text': translated_text}}
+    ]
     docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
-
-    # 3. 作成したファイルをターゲットフォルダへ移動する
-    # ルートフォルダ（'root'）から削除し、TARGET_FOLDER_IDへ追加
-    file = drive_service.files().get(fileId=doc_id, fields='parents').execute()
-    previous_parents = ",".join(file.get('parents'))
     
-    drive_service.files().update(
-        fileId=doc_id, 
-        addParents=folder_id, 
-        removeParents=previous_parents,
-        fields='id, parents'
-    ).execute()
-    
-    return doc_id
+    return doc_id, title
 
 if __name__ == "__main__":
     try:
