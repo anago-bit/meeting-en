@@ -53,44 +53,34 @@ def translate_full_text(text):
     return response.text
 
 def create_and_move_doc(original_name, translated_text):
-    """Drive APIを優先して使用する作成フロー"""
     creds = get_credentials()
     drive_service = build('drive', 'v3', credentials=creds)
     docs_service = build('docs', 'v1', credentials=creds)
 
     title = f"【翻訳完了】{original_name}"
     
-    # 1. Drive APIを使ってドキュメントを作成（こちらの方が権限エラーに強い傾向があります）
+    # 共有ドライブ対応のメタデータ
     file_metadata = {
         'name': title,
-        'mimeType': 'application/vnd.google-apps.document'
+        'mimeType': 'application/vnd.google-apps.document',
+        'parents': [TARGET_FOLDER_ID]
     }
     
-    print(">>> ドキュメントの枠を作成中...")
-    file = drive_service.files().create(body=file_metadata, fields='id').execute()
+    print(f">>> 共有ドライブ内のフォルダ(ID: {TARGET_FOLDER_ID})に直接作成中...")
+    
+    # 修正ポイント：supportsAllDrives=True を追加
+    file = drive_service.files().create(
+        body=file_metadata, 
+        fields='id',
+        supportsAllDrives=True  # 共有ドライブをサポート
+    ).execute()
+    
     doc_id = file.get('id')
 
-    # 2. 本文を書き込み
+    # 本文を書き込み
     print(f">>> 内容を書き込み中... (ID: {doc_id})")
-    requests = [{'insertText': {'location': {'index': 1}, 'text': translated_text}}]
-    docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
-
-    # 3. ターゲットフォルダへ移動を試みる
-    if TARGET_FOLDER_ID:
-        try:
-            # 現在の親フォルダ（通常はroot）を確認
-            file_info = drive_service.files().get(fileId=doc_id, fields='parents').execute()
-            previous_parents = ",".join(file_info.get('parents', []))
-            
-            drive_service.files().update(
-                fileId=doc_id,
-                addParents=TARGET_FOLDER_ID,
-                removeParents=previous_parents,
-                fields='id, parents'
-            ).execute()
-            print(f">>> 共有フォルダへの移動に成功しました。")
-        except Exception as e:
-            print(f"⚠️ 移動に失敗しました。マイドライブを確認してください。: {e}")
+    requests_list = [{'insertText': {'location': {'index': 1}, 'text': translated_text}}]
+    docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_list}).execute()
 
     return doc_id, title
 
