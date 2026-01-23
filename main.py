@@ -1,6 +1,7 @@
 import os
 import json
 import smtplib
+import requests
 from email.mime.text import MIMEText
 from email.utils import formatdate
 from google.oauth2 import service_account
@@ -28,9 +29,24 @@ def get_credentials():
     return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 
 def find_latest_doc():
+    """未処理の最新ドキュメントを探す（【処理済】を含まないもの）"""
     service = build('drive', 'v3', credentials=get_credentials())
-    query = f"'{SOURCE_FOLDER_ID}' in parents and name contains '{SEARCH_KEYWORD}' and mimeType = 'application/vnd.google-apps.document' and trashed = false"
-    results = service.files().list(q=query, orderBy="modifiedTime desc", pageSize=1, fields="files(id, name)", includeItemsFromAllDrives=True, supportsAllDrives=True).execute()
+    # クエリに「not name contains '【処理済】'」を追加
+    query = (
+        f"'{SOURCE_FOLDER_ID}' in parents and "
+        f"name contains '{SEARCH_KEYWORD}' and "
+        f"not name contains '【処理済】' and "
+        f"mimeType = 'application/vnd.google-apps.document' and "
+        f"trashed = false"
+    )
+    results = service.files().list(
+        q=query, 
+        orderBy="modifiedTime desc", 
+        pageSize=1, 
+        fields="files(id, name)", 
+        includeItemsFromAllDrives=True, 
+        supportsAllDrives=True
+    ).execute()
     files = results.get('files', [])
     return files[0] if files else None
 
@@ -73,19 +89,31 @@ def copy_original_file(file_id, original_name):
     try:
         copy_metadata = {'name': f"【原本】{original_name}", 'parents': [TARGET_FOLDER_ID]}
         drive_service.files().copy(fileId=file_id, body=copy_metadata, supportsAllDrives=True).execute()
-        print(f">>> 原本のコピー完了")
+        print(f">>> 共有ドライブへ原本をコピーしました")
     except Exception as e:
-        print(f"⚠️ コピー失敗: {e}")
+        print(f"⚠️ 原本のコピー失敗: {e}")
+
+def rename_original_file(file_id, original_name):
+    """原本の名前に【処理済】を付与して重複を防止する"""
+    drive_service = build('drive', 'v3', credentials=get_credentials())
+    try:
+        new_name = f"【処理済】{original_name}"
+        drive_service.files().update(
+            fileId=file_id, 
+            body={'name': new_name},
+            supportsAllDrives=True
+        ).execute()
+        print(f">>> 原本を「{new_name}」にリネームしました")
+    except Exception as e:
+        print(f"⚠️ リネーム失敗: {e}")
 
 def send_email_notification(title, doc_url):
-    """Talknoteの投稿用アドレスへメールを送信（接続安定版）"""
     if not all([MAIL_ADDRESS, MAIL_PASSWORD, TALKNOTE_POST_EMAIL]):
-        print("メール設定が不足しているため送信をスキップします。")
+        print("メール設定不足のため送信スキップ")
         return
-
-    subject = f"翻訳完了: {title}"
-    body = f"議事録の自動翻訳と保存が完了しました。\n\n【タイトル】\n{title}\n\n【URL】\n{doc_url}"
     
+    subject = f"翻訳完了: {title}"
+    body = f"自動翻訳が完了しました。\n\n{title}\n{doc_url}"
     msg = MIMEText(body)
     msg['Subject'] = subject
     msg['From'] = MAIL_ADDRESS
@@ -93,39 +121,40 @@ def send_email_notification(title, doc_url):
     msg['Date'] = formatdate(localtime=True)
 
     try:
-        # ポートが465の場合は直接SSL接続
         if MAIL_SMTP_PORT == "465":
             server = smtplib.SMTP_SSL(MAIL_SMTP_SERVER, int(MAIL_SMTP_PORT), timeout=20)
         else:
-            # それ以外（587等）はSTARTTLS
             server = smtplib.SMTP(MAIL_SMTP_SERVER, int(MAIL_SMTP_PORT), timeout=20)
-            server.ehlo()
             server.starttls()
-            server.ehlo()
-        
         server.login(MAIL_ADDRESS, MAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("✅ Talknote投稿用メールの送信に成功しました。")
+        print("✅ Talknoteメール送信成功")
     except Exception as e:
-        print(f"❌ メール送信エラー (詳細): {e}")
+        print(f"❌ メール送信エラー: {e}")
 
 if __name__ == "__main__":
     try:
         target_file = find_latest_doc()
         if target_file:
-            print(f">>> 処理開始: {target_file['name']}")
-            content = read_doc(target_file['id'])
+            orig_id = target_file['id']
+            orig_name = target_file['name']
+            print(f">>> 処理開始: {orig_name}")
+            
+            content = read_doc(orig_id)
             translated = translate_full_text(content)
-            new_id, new_title = create_translated_doc(target_file['name'], translated)
-            copy_original_file(target_file['id'], target_file['name'])
+            
+            # 1. 翻訳ドキュメント作成
+            new_id, new_title = create_translated_doc(orig_name, translated)
+            # 2. 共有ドライブへ原本をコピー
+            copy_original_file(orig_id, orig_name)
+            # 3. ★原本の名前を変更（これが二重実行のストッパーになります）
+            rename_original_file(orig_id, orig_name)
             
             url = f"https://docs.google.com/document/d/{new_id}/edit"
             print(f"✅ 全工程完了 URL: {url}")
-            
-            # メール通知を実行
             send_email_notification(new_title, url)
         else:
-            print("対象ファイルが見つかりませんでした。")
+            print("新規の未処理ファイルは見つかりませんでした。")
     except Exception as e:
         print(f"❌ 致命的エラー: {e}")
