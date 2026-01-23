@@ -17,127 +17,92 @@ TALKNOTE_GROUP_ID = os.environ.get("TALKNOTE_GROUP_ID")
 SCOPES = ['https://www.googleapis.com/auth/documents', 'https://www.googleapis.com/auth/drive']
 
 def get_credentials():
-    if not SERVICE_ACCOUNT_JSON:
-        raise ValueError("環境変数 SERVICE_ACCOUNT_JSON が未設定です。")
     info = json.loads(SERVICE_ACCOUNT_JSON)
     return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 
-def find_and_move_latest_meeting_doc():
-    """SOURCEフォルダからキーワードに合う最新ファイルを探して移動。移動済みならそのまま。"""
+def find_latest_doc():
+    """SOURCEまたはTARGETから最新ファイルを探す"""
     creds = get_credentials()
-    drive_service = build('drive', 'v3', credentials=creds)
-    
-    # 検索範囲を SOURCE または TARGET の両方にする（移動済みでも見つけられるように）
-    query = (
-        f"( '{SOURCE_FOLDER_ID}' in parents or '{TARGET_FOLDER_ID}' in parents ) and "
-        f"name contains '{SEARCH_KEYWORD}' and "
-        f"mimeType = 'application/vnd.google-apps.document' and "
-        f"trashed = false"
-    )
-    
-    results = drive_service.files().list(q=query, orderBy="modifiedTime desc", pageSize=1, fields="files(id, name, parents)").execute()
+    service = build('drive', 'v3', credentials=creds)
+    query = f"( '{SOURCE_FOLDER_ID}' in parents or '{TARGET_FOLDER_ID}' in parents ) and name contains '{SEARCH_KEYWORD}' and mimeType = 'application/vnd.google-apps.document' and trashed = false"
+    results = service.files().list(q=query, orderBy="modifiedTime desc", pageSize=1, fields="files(id, name)").execute()
     files = results.get('files', [])
-    
-    if not files:
-        print(f"情報: 「{SEARCH_KEYWORD}」を含むファイルは見つかりませんでした。")
-        return None, None
-
-    target_file = files[0]
-    file_id = target_file['id']
-    file_name = target_file['name']
-    current_parents = target_file.get('parents', [])
-
-    # すでに TARGET フォルダにいる場合は移動処理をスキップ
-    if TARGET_FOLDER_ID in current_parents:
-        print(f"✅ すでに専用フォルダに存在します: 「{file_name}」")
-    else:
-        print(f"🔒 隔離移動を実行中: 「{file_name}」")
-        previous_parents = ",".join(current_parents)
-        try:
-            drive_service.files().update(
-                fileId=file_id, 
-                addParents=TARGET_FOLDER_ID, 
-                removeParents=previous_parents
-            ).execute()
-        except Exception as e:
-            print(f"移動処理中にエラー(404等)が発生しましたが、ファイルは存在するため続行します。")
-    
-    return file_id, file_name
+    return files[0] if files else (None, None)
 
 def read_doc(doc_id):
-    creds = get_credentials()
-    service = build('docs', 'v1', credentials=creds)
+    service = build('docs', 'v1', credentials=get_credentials())
     document = service.documents().get(documentId=doc_id).execute()
-    full_text = []
-    def extract_text_elements(elements):
-        text = ""
-        for element in elements:
-            if 'textRun' in element:
-                text += element.get('textRun').get('content', '')
-        return text
+    text = ""
     for content in document.get('body').get('content'):
         if 'paragraph' in content:
-            full_text.append(extract_text_elements(content.get('paragraph').get('elements')))
+            for element in content.get('paragraph').get('elements'):
+                text += element.get('textRun', {}).get('content', '')
         elif 'table' in content:
             for row in content.get('table').get('tableRows'):
                 for cell in row.get('tableCells'):
                     for cell_content in cell.get('content'):
                         if 'paragraph' in cell_content:
-                            full_text.append(extract_text_elements(cell_content.get('paragraph').get('elements')))
-    return "\n".join(full_text)
+                            for element in cell_content.get('paragraph').get('elements'):
+                                text += element.get('textRun', {}).get('content', '')
+    return text
 
 def translate_full_text(text):
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = f"以下の議事録を省略せず一字一句翻訳してください。英語とネパール語で出力してください。\n\n議事録テキスト:\n{text}"
+    prompt = f"以下の議事録を一字一句漏らさず英語とネパール語に翻訳してください。要約禁止。\n\n{text}"
     response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
     return response.text
 
-def create_translated_doc(folder_id, original_name, translated_text):
-    """最初からTARGETフォルダ内にドキュメントを作成"""
+def create_and_move_doc(original_name, translated_text):
+    """1. マイドライブ直下に作成 2. ターゲットフォルダへ移動"""
     creds = get_credentials()
     drive_service = build('drive', 'v3', credentials=creds)
     docs_service = build('docs', 'v1', credentials=creds)
 
+    # 1. まずは「マイドライブ直下」に作成
     title = f"【翻訳完了】{original_name}"
-    file_metadata = {
-        'name': title,
-        'mimeType': 'application/vnd.google-apps.document',
-        'parents': [folder_id]
-    }
-    file = drive_service.files().create(body=file_metadata, fields='id').execute()
-    doc_id = file.get('id')
+    doc = docs_service.documents().create(body={'title': title}).execute()
+    doc_id = doc.get('documentId')
 
+    # 2. 本文を書き込み
     requests = [{'insertText': {'location': {'index': 1}, 'text': translated_text}}]
     docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
+    print(f">>> ドキュメント作成完了 (ID: {doc_id})")
+
+    # 3. ターゲットフォルダへ移動を試みる
+    try:
+        file = drive_service.files().get(fileId=doc_id, fields='parents').execute()
+        previous_parents = ",".join(file.get('parents'))
+        drive_service.files().update(
+            fileId=doc_id,
+            addParents=TARGET_FOLDER_ID,
+            removeParents=previous_parents,
+            fields='id, parents'
+        ).execute()
+        print(f">>> 共有フォルダ(ID: {TARGET_FOLDER_ID})への移動に成功しました。")
+    except Exception as e:
+        print(f"⚠️ 共有フォルダへの移動に失敗しました。ファイルはマイドライブ直下に残っています。エラー: {e}")
+
     return doc_id, title
 
 def post_to_talknote(title, doc_url):
-    if not TALKNOTE_API_TOKEN or not TALKNOTE_GROUP_ID:
-        print("Talknote設定がありません。投稿をスキップします。")
-        return
-    url = "https://api.talknote.com/v1/posts"
-    headers = {"Authorization": f"Bearer {TALKNOTE_API_TOKEN}"}
+    if not TALKNOTE_API_TOKEN: return
     message = f"📢 翻訳完了通知\n\n【件名】: {title}\n【URL】: {doc_url}"
-    data = {"group_id": TALKNOTE_GROUP_ID, "body": message}
-    response = requests.post(url, headers=headers, data=data)
-    if response.status_code == 200:
-        print("✅ Talknote投稿成功")
-    else:
-        print(f"❌ Talknote投稿エラー: {response.text}")
+    res = requests.post("https://api.talknote.com/v1/posts", 
+                        headers={"Authorization": f"Bearer {TALKNOTE_API_TOKEN}"},
+                        data={"group_id": TALKNOTE_GROUP_ID, "body": message})
+    print("✅ Talknote投稿成功" if res.status_code == 200 else f"❌ Talknote投稿失敗: {res.text}")
 
 if __name__ == "__main__":
     try:
-        fid, fname = find_and_move_latest_meeting_doc()
-        if fid:
-            print(f">>> 読み取り中: {fname}")
-            content = read_doc(fid)
-            print(f"取得文字数: {len(content)} 文字")
-            print(">>> 翻訳中...")
-            result = translate_full_text(content)
-            print(">>> 保存中...")
-            new_id, new_title = create_translated_doc(TARGET_FOLDER_ID, fname, result)
-            new_url = f"https://docs.google.com/document/d/{new_id}/edit"
-            print(f"✅ 成功！ URL: {new_url}")
-            post_to_talknote(new_title, new_url)
+        target_file = find_latest_doc()
+        if target_file and 'id' in target_file:
+            print(f">>> 処理開始: {target_file['name']}")
+            content = read_doc(target_file['id'])
+            print(f">>> 取得文字数: {len(content)} 文字")
+            translated = translate_full_text(content)
+            new_id, new_title = create_and_move_doc(target_file['name'], translated)
+            url = f"https://docs.google.com/document/d/{new_id}/edit"
+            print(f"✅ 完了 URL: {url}")
+            post_to_talknote(new_title, url)
     except Exception as e:
-        print(f"❌ エラー: {e}")
+        print(f"❌ 致命的エラー: {e}")
