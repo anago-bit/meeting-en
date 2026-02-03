@@ -1,15 +1,14 @@
 name: Meet Transcript Translator
 
 on:
-  # 手動実行用（テストに便利）
   workflow_dispatch:
-  # 毎日決まった時間に動かす場合（例：日本時間 21時 = UTC 12時）
   schedule:
-    - cron: '*/5 * * * *'  # 5分ごとに実行
+    - cron: '*/15 * * * *'  # 15分おき（GitHubで最も安定して動く最小間隔）
 
 jobs:
   translate:
     runs-on: ubuntu-latest
+    # デフォルトブランチ（main）で実行されていることを確認してください
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,7 +21,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install google-api-python-client google-auth-oauthlib google-auth-httplib2 google-genai
+          # 必要なライブラリを網羅
+          pip install google-api-python-client google-auth-oauthlib google-auth-httplib2 google-generativeai requests
 
       - name: Run translation
         env:
